@@ -1,0 +1,12 @@
+# Core numerical + data
+numpy==1.26.4
+pandas==2.2.2
+
+# Visualization
+matplotlib==3.8.4
+
+# GPU monitoring
+pynvml==11.5.0
+
+# RAPIDS cuML (installed separately via conda or system)
+# NOTE: Do NOT pip install cuML directly on your system
