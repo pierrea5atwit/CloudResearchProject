@@ -1,0 +1,28 @@
+environment: "virtual"
+
+experiment:
+  duration_seconds: 60
+  warmup_seconds: 5
+  repeat_runs: 3
+
+# GPU kernel workload: CuPy matrix multiplication (actual GPU load)
+workload:
+  n_samples: 1024
+  n_features: 64
+  n_classes: 4
+  batch_size: 64
+  inference_loops: 100
+  k_neighbors: 5
+  random_seed: 42
+  backend: "cupy"
+  workload_type: "gpu_kernel"  # Use CuPy matrix multiplication instead of kNN
+
+concurrency:
+  num_workers: 2
+
+monitoring:
+  sample_interval_sec: 0.5
+
+logging:
+  output_dir: "results/"
+  log_interval: 1

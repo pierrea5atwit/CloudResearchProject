@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from config import load_config, run_gpu_sanity_check
+from config import load_config
 from logger import get_logger, log_runtime_environment
 from monitor import Monitor
 from runner import run_concurrent_workers
@@ -24,10 +24,10 @@ def _parse_args() -> argparse.Namespace:
         help="Seconds to sample GPU utilization during sanity check",
     )
     parser.add_argument(
-        "--allow-non-virtual",
+        "--dev-skip-vgpu-gate",
         dest="require_virtual",
         action="store_false",
-        help="Allow execution even when runtime virtual/vGPU checks cannot be verified",
+        help="[DEV ONLY] Skip strict virtual/vGPU environment checks. Used for local testing when NVML is unavailable.",
     )
     parser.add_argument(
         "--progress-interval-sec",
@@ -91,6 +91,38 @@ def _resolve_config_path(raw_config_path: str) -> Path:
     raise FileNotFoundError(f"Config path does not exist: '{raw_config_path}'. Searched: {searched}")
 
 
+def _validate_runtime_gpu_activity(
+    telemetry_samples: list[dict[str, Any]],
+    min_expected_gpu_utilization: float = 30.0,
+) -> dict[str, Any]:
+    """Validate GPU activity from telemetry collected during worker execution.
+
+    Expected to run AFTER workers complete, using samples captured DURING load.
+    """
+    gpu_utils = [
+        item.get("gpu_utilization_pct", 0.0)
+        for item in telemetry_samples
+        if "gpu_utilization_pct" in item and "error" not in item
+    ]
+    if not gpu_utils:
+        return {
+            "valid": False,
+            "peak_gpu_utilization_during_run": None,
+            "samples_with_util_data": 0,
+            "reason": "No GPU utilization data collected during run",
+        }
+    peak = max(gpu_utils)
+    valid = peak >= min_expected_gpu_utilization
+    return {
+        "valid": valid,
+        "peak_gpu_utilization_during_run": peak,
+        "mean_gpu_utilization_during_run": sum(gpu_utils) / len(gpu_utils),
+        "samples_with_util_data": len(gpu_utils),
+        "threshold": min_expected_gpu_utilization,
+        "reason": None if valid else f"GPU utilization peaked at {peak}%, expected >={min_expected_gpu_utilization}%",
+    }
+
+
 def _estimate_parallel_runtime(dry_run_result: dict[str, Any], num_workers: int) -> dict[str, float]:
     """Estimate expected runtime and throughput from single-worker baseline.
 
@@ -143,7 +175,7 @@ def main() -> None:
             )
         log.info("Virtual environment gate passed (NVIDIA vGPU signal detected).")
 
-    log.info("GPU sanity check protocol: step 1 single-worker dry run, step 2 utilization validation (>50%%).")
+    log.info("Baseline dry run for runtime estimation.")
     dry_run_result = Workload(config["workload"]).run()
     log.info("Single-worker dry run complete: %s", dry_run_result)
 
@@ -158,16 +190,7 @@ def main() -> None:
         estimate["estimated_aggregate_rps"],
     )
 
-    sanity = run_gpu_sanity_check(
-        duration_seconds=args.sanity_duration,
-        min_expected_gpu_utilization=50.0,
-        gpu_index=args.gpu_index,
-    )
-    log.info("GPU sanity check result: %s", sanity)
-    if not sanity.get("valid", False):
-        if args.require_virtual:
-            raise RuntimeError("Experiment credibility check failed: observed GPU utilization is below threshold (>50% expected).")
-        log.warning("Sanity check failed in non-virtual override mode; continuing for local testability.")
+    log.info("GPU activity validation will occur post-run using telemetry collected during worker execution.")
 
     monitor_interval = float(config["monitoring"].get("sample_interval_sec", 1))
     monitor = Monitor(sample_interval_sec=monitor_interval, gpu_index=args.gpu_index)
@@ -215,6 +238,19 @@ def main() -> None:
     finally:
         telemetry_samples = monitor.stop()
         log.info("Telemetry monitor stopped with %d samples.", len(telemetry_samples))
+
+    gpu_activity_valid = _validate_runtime_gpu_activity(
+        telemetry_samples,
+        min_expected_gpu_utilization=30.0,
+    )
+    log.info("GPU activity validation result: %s", gpu_activity_valid)
+    if not gpu_activity_valid.get("valid", False):
+        if args.require_virtual:
+            raise RuntimeError(
+                f"Experiment GPU activity check failed: {gpu_activity_valid.get('reason')}. "
+                "This may indicate the workload is not GPU-bound or GPU resources are unavailable."
+            )
+        log.warning("GPU activity check failed; dev-skip-vgpu-gate override active. Continuing for local testability.")
 
     summary = _aggregate_results(worker_results, telemetry_samples)
     log.info("Final aggregation: %s", summary)

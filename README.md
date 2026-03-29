@@ -69,11 +69,50 @@ Success Statement:
 The project will be considered successful if the accelerator-aware control framework reduces training throughput variance by at least 30% in multi-tenant virtual GPU environments while maintaining telemetry overhead below 3% CPU utilization. Additionally, the system must detect GPU contention events with ≥85% accuracy, attribute performance bottlenecks correctly in ≥80% of experiments, and maintain scaling efficiency above 70%
 
 
+## Setup
+
+Install dependencies:
+
+```
+pip install -r requirements.txt
+```
+
+**Optional: GPU Kernel Workload Support**
+
+For GPU-accelerated matrix multiply workload on vGPU instances:
+
+```
+pip install cupy-cuda12x  # CUDA 12.x
+# or
+pip install cupy-cuda11x  # CUDA 11.x
+```
+
+Verify your CUDA version: `nvidia-smi`
+
 ## Usage
 
 Run from the workspace root:
 
 python project/main.py --config configs/virtual.yaml
+
+### Workload Types
+
+The project supports two workload modes configured in the YAML:
+
+**kNN Inference (default)**
+- CPU-based kNN distance computation
+- Good for testing CPU baseline and framework overhead
+- No GPU dependencies
+
+**GPU-Accelerated Matrix Multiplication** (`gpu_kernel`)
+- Requires CuPy: `pip install cupy-cuda12x` (adjust CUDA version as needed)
+- Produces sustained GPU load via matrix multiplication
+- Recommended for vGPU virtual experiments
+- Returns GFLOPs/sec metrics for GPU throughput measurement
+
+To use GPU kernel workload:
+
+python project/main.py --config configs/virtual_gpu_kernel.yaml
 
 ## Command-Line Arguments
 
@@ -81,14 +120,13 @@ python project/main.py --config configs/virtual.yaml
 | --- | --- | --- | --- |
 | --config PATH | Yes | None | Path to YAML experiment config file. Supports absolute paths and relative paths from workspace root or project directory. |
 | --gpu-index INT | No | 0 | GPU index used for runtime environment checks and telemetry sampling. |
-| --sanity-duration INT | No | 5 | Number of seconds to sample GPU utilization for the sanity check. |
-| --allow-non-virtual | No | Off | Bypasses strict virtual/vGPU gate checks for local testing when NVML or vGPU signals are unavailable. |
+| --dev-skip-vgpu-gate | No | Off | [DEV ONLY] Bypasses strict virtual/vGPU environment verification. Use only when testing locally and NVML or vGPU indicators are unavailable. |
 | --progress-interval-sec FLOAT | No | 5.0 | Interval (seconds) for worker progress updates in CLI logs. Internally throttled to avoid high overhead. |
 | --no-progress | No | Off | Disables periodic worker progress logging. Final worker summaries are still printed. |
 
 ## Common Commands
 
-Strict virtual run (default behavior):
+Strict virtual run (default, enforces vGPU validation):
 
 python project/main.py --config configs/virtual.yaml
 
@@ -100,16 +138,18 @@ Run with explicit GPU index:
 
 python project/main.py --config configs/virtual.yaml --gpu-index 0
 
-Local test mode (non-virtual override):
+Local development mode (non-vGPU override, for testing when NVML unavailable):
 
-python project/main.py --config configs/virtual.yaml --allow-non-virtual
+python project/main.py --config configs/virtual.yaml --dev-skip-vgpu-gate
 
-Local test mode without progress spam:
+Local dev mode without progress spam:
 
-python project/main.py --config configs/virtual.yaml --allow-non-virtual --no-progress
+python project/main.py --config configs/virtual.yaml --dev-skip-vgpu-gate --no-progress
 
 ## Notes
 
-- The workflow expects environment: virtual in the selected config.
-- In strict mode, runtime must show virtual/vGPU indicators or execution stops.
-- Use --allow-non-virtual only for local/debug environments where validation signals are incomplete.
+- The workflow is **strict virtual-only** by default. Config must have `environment: virtual`.
+- In strict mode, runtime must show virtual/vGPU indicators AND GPU activity during worker execution.
+- GPU activity validation occurs **post-run** using telemetry collected during active worker execution (not idle time).
+- Use `--dev-skip-vgpu-gate` only for local/debug environments where cloud vGPU signals are incomplete or NVML is unavailable.
+- This project uses numpy fallback inference for CPU-based testing; GPU-accelerated cuML is not installed.

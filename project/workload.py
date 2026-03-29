@@ -31,6 +31,7 @@ class WorkloadConfig:
     inference_loops: int = 500
     random_seed: int = 42
     backend: str = "numpy"  # "numpy" or "cupy"
+    workload_type: str = "knn"  # "knn" for inference, "gpu_kernel" for GPU matrix ops
 
 
 class Workload:
@@ -103,12 +104,84 @@ class Workload:
             preds[i] = int(np.argmax(counts))
         return preds
 
+    def _gpu_kernel_matmul(self) -> dict[str, Any]:
+        """Run GPU-accelerated matrix multiplication workload using CuPy.
+
+        Produces sustained GPU load without requiring heavy ML frameworks.
+        """
+        if cp is None:
+            raise RuntimeError("CuPy not available. Install via: pip install cupy-cuda12x (or appropriate CUDA version)")
+
+        loops = int(self.config.inference_loops)
+        matrix_dim = int(int(self.config.n_samples) ** 0.5)
+        latencies_ms: list[float] = []
+        start_total = time.perf_counter()
+        last_progress_ts = start_total
+
+        # Pre-allocate GPU matrices for sustained operations
+        cp.random.seed(int(self.config.random_seed))
+        a = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
+        b = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
+
+        for loop_idx in range(loops):
+            start = time.perf_counter()
+            _ = cp.dot(a, b)  # GPU matrix multiplication
+            cp.cuda.Stream.null.synchronize()  # Ensure GPU work completes
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            latencies_ms.append(elapsed_ms)
+
+            if loop_idx % max(1, loops // 10) == 0 or loop_idx == loops - 1:
+                elapsed_so_far = time.perf_counter() - start_total
+                avg_loop_sec = elapsed_so_far / float(loop_idx + 1)
+                loops_remaining = loops - (loop_idx + 1)
+
+        elapsed_total = time.perf_counter() - start_total
+        total_requests = loops
+        flops_per_matmul = 2 * (matrix_dim ** 3)  # Approximate FLOPs
+        total_flops = total_requests * flops_per_matmul
+        gflops_per_sec = (total_flops / 1e9) / elapsed_total if elapsed_total > 0 else 0.0
+
+        stats = self._latency_stats(latencies_ms)
+        stats.update(
+            {
+                "backend_requested": self.config.backend,
+                "backend_used": "cupy",
+                "model_backend": "gpu-kernel-matmul",
+                "matrix_dimension": matrix_dim,
+                "total_requests": total_requests,
+                "total_flops": int(total_flops),
+                "gflops_per_sec": gflops_per_sec,
+                "elapsed_total_sec": elapsed_total,
+                "throughput_requests_per_sec": total_requests / elapsed_total if elapsed_total > 0 else 0.0,
+            }
+        )
+        return stats
+
     def run(
         self,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_interval_sec: float = 5.0,
     ) -> dict[str, Any]:
-        """Execute repeated inference and return throughput and latency statistics."""
+        """Execute workload and return throughput and latency statistics.
+
+        Workload type is determined by config.workload_type:
+        - "knn": kNN inference (existing behavior)
+        - "gpu_kernel": GPU-accelerated matrix multiplication (requires CuPy)
+        """
+        workload_type = str(self.config.workload_type).lower().strip()
+
+        if workload_type == "gpu_kernel":
+            return self._gpu_kernel_matmul()
+
+        # Default to kNN workload
+        return self._run_knn_inference(progress_callback=progress_callback, progress_interval_sec=progress_interval_sec)
+
+    def _run_knn_inference(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        progress_interval_sec: float = 5.0,
+    ) -> dict[str, Any]:
+        """Execute kNN inference workload and return throughput and latency statistics."""
         backend = self._resolve_backend()
         x_train, y_train, x_infer = self._generate_synthetic_dataset(backend)
 
