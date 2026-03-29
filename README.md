@@ -69,7 +69,47 @@ Success Statement:
 The project will be considered successful if the accelerator-aware control framework reduces training throughput variance by at least 30% in multi-tenant virtual GPU environments while maintaining telemetry overhead below 3% CPU utilization. Additionally, the system must detect GPU contention events with ≥85% accuracy, attribute performance bottlenecks correctly in ≥80% of experiments, and maintain scaling efficiency above 70%
 
 
-## USAGE
+## Usage
 
-(physical GPU) run: python main.py --config configs/physical.yaml 
-(virtual GPU) run: python main.py --config configs/virtual.yaml 
+Run from the workspace root:
+
+python project/main.py --config configs/virtual.yaml
+
+## Command-Line Arguments
+
+| Argument | Required | Default | Description |
+| --- | --- | --- | --- |
+| --config PATH | Yes | None | Path to YAML experiment config file. Supports absolute paths and relative paths from workspace root or project directory. |
+| --gpu-index INT | No | 0 | GPU index used for runtime environment checks and telemetry sampling. |
+| --sanity-duration INT | No | 5 | Number of seconds to sample GPU utilization for the sanity check. |
+| --allow-non-virtual | No | Off | Bypasses strict virtual/vGPU gate checks for local testing when NVML or vGPU signals are unavailable. |
+| --progress-interval-sec FLOAT | No | 5.0 | Interval (seconds) for worker progress updates in CLI logs. Internally throttled to avoid high overhead. |
+| --no-progress | No | Off | Disables periodic worker progress logging. Final worker summaries are still printed. |
+
+## Common Commands
+
+Strict virtual run (default behavior):
+
+python project/main.py --config configs/virtual.yaml
+
+Virtual run with custom progress interval:
+
+python project/main.py --config configs/virtual.yaml --progress-interval-sec 3
+
+Run with explicit GPU index:
+
+python project/main.py --config configs/virtual.yaml --gpu-index 0
+
+Local test mode (non-virtual override):
+
+python project/main.py --config configs/virtual.yaml --allow-non-virtual
+
+Local test mode without progress spam:
+
+python project/main.py --config configs/virtual.yaml --allow-non-virtual --no-progress
+
+## Notes
+
+- The workflow expects environment: virtual in the selected config.
+- In strict mode, runtime must show virtual/vGPU indicators or execution stops.
+- Use --allow-non-virtual only for local/debug environments where validation signals are incomplete.

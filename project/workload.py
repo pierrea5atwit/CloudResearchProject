@@ -1,9 +1,182 @@
 """Workload module for cuML inference logic."""
 
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import numpy as np
+
+try:
+    import cupy as cp  # type: ignore
+except Exception:  # pragma: no cover - optional at development time
+    cp = None  # type: ignore[assignment]
+
+try:
+    from cuml.neighbors import KNeighborsClassifier  # type: ignore
+except Exception:  # pragma: no cover - optional at development time
+    KNeighborsClassifier = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class WorkloadConfig:
+    """Configuration for synthetic data generation and inference loops."""
+
+    n_samples: int = 200_000
+    n_features: int = 64
+    n_classes: int = 4
+    k_neighbors: int = 5
+    batch_size: int = 1_000
+    inference_loops: int = 500
+    random_seed: int = 42
+    backend: str = "numpy"  # "numpy" or "cupy"
+
 
 class Workload:
-    """Placeholder class for inference workload implementation."""
+    """cuML kNN inference workload runner."""
 
-    def run(self) -> None:
-        """Execute workload logic."""
-        raise NotImplementedError("Implement cuML inference workflow in Workload.run().")
+    def __init__(self, config: dict[str, Any] | WorkloadConfig) -> None:
+        if isinstance(config, WorkloadConfig):
+            self.config = config
+        else:
+            self.config = WorkloadConfig(**config)
+
+    def _resolve_backend(self) -> str:
+        requested = self.config.backend.lower().strip()
+        if requested not in {"numpy", "cupy"}:
+            raise ValueError("backend must be either 'numpy' or 'cupy'")
+        if requested == "cupy" and cp is None:
+            return "numpy"
+        return requested
+
+    def _generate_synthetic_dataset(self, backend: str) -> tuple[Any, Any, Any]:
+        """Generate train and inference inputs on selected backend."""
+        n_samples = int(self.config.n_samples)
+        n_features = int(self.config.n_features)
+        batch_size = int(self.config.batch_size)
+        n_classes = int(self.config.n_classes)
+        seed = int(self.config.random_seed)
+
+        if backend == "cupy":
+            assert cp is not None
+            cp.random.seed(seed)
+            x_train = cp.random.random((n_samples, n_features), dtype=cp.float32)
+            y_train = cp.random.randint(0, n_classes, size=n_samples, dtype=cp.int32)
+            x_infer = cp.random.random((batch_size, n_features), dtype=cp.float32)
+            return x_train, y_train, x_infer
+
+        rng = np.random.default_rng(seed)
+        x_train = rng.random((n_samples, n_features), dtype=np.float32)
+        y_train = rng.integers(0, n_classes, size=n_samples, dtype=np.int32)
+        x_infer = rng.random((batch_size, n_features), dtype=np.float32)
+        return x_train, y_train, x_infer
+
+    def _latency_stats(self, latencies_ms: list[float]) -> dict[str, float]:
+        lat_arr = np.array(latencies_ms, dtype=np.float64)
+        return {
+            "latency_mean_ms": float(np.mean(lat_arr)),
+            "latency_std_ms": float(np.std(lat_arr)),
+            "latency_min_ms": float(np.min(lat_arr)),
+            "latency_p50_ms": float(np.percentile(lat_arr, 50)),
+            "latency_p95_ms": float(np.percentile(lat_arr, 95)),
+            "latency_p99_ms": float(np.percentile(lat_arr, 99)),
+            "latency_max_ms": float(np.max(lat_arr)),
+        }
+
+    def _predict_numpy_fallback(self, x_train: np.ndarray, y_train: np.ndarray, x_infer: np.ndarray) -> np.ndarray:
+        """Lightweight kNN fallback used only when cuML is unavailable."""
+        max_train = min(4096, x_train.shape[0])
+        max_batch = min(256, x_infer.shape[0])
+        x_train_small = x_train[:max_train]
+        y_train_small = y_train[:max_train]
+        x_infer_small = x_infer[:max_batch]
+
+        # Squared Euclidean distance via vectorized broadcast.
+        distances = np.sum((x_infer_small[:, None, :] - x_train_small[None, :, :]) ** 2, axis=2)
+        k = min(int(self.config.k_neighbors), max_train)
+        nearest_idx = np.argpartition(distances, kth=max(0, k - 1), axis=1)[:, :k]
+        nearest_labels = y_train_small[nearest_idx]
+        preds = np.empty(nearest_labels.shape[0], dtype=np.int32)
+        for i, row in enumerate(nearest_labels):
+            counts = np.bincount(row.astype(np.int32), minlength=int(self.config.n_classes))
+            preds[i] = int(np.argmax(counts))
+        return preds
+
+    def run(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        progress_interval_sec: float = 5.0,
+    ) -> dict[str, Any]:
+        """Execute repeated inference and return throughput and latency statistics."""
+        backend = self._resolve_backend()
+        x_train, y_train, x_infer = self._generate_synthetic_dataset(backend)
+
+        model_backend = "cuml"
+        model: Any | None = None
+        if KNeighborsClassifier is not None:
+            model = KNeighborsClassifier(n_neighbors=int(self.config.k_neighbors))
+            model.fit(x_train, y_train)
+        else:
+            model_backend = "numpy-fallback"
+            if backend == "cupy" and cp is not None:
+                x_train = cp.asnumpy(x_train)
+                y_train = cp.asnumpy(y_train)
+                x_infer = cp.asnumpy(x_infer)
+
+        loops = int(self.config.inference_loops)
+        if loops <= 0:
+            raise ValueError("inference_loops must be > 0")
+
+        latencies_ms: list[float] = []
+        start_total = time.perf_counter()
+        last_progress_ts = start_total
+
+        for loop_idx in range(loops):
+            start = time.perf_counter()
+            if model_backend == "cuml":
+                _ = model.predict(x_infer)
+            else:
+                _ = self._predict_numpy_fallback(x_train, y_train, x_infer)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            latencies_ms.append(elapsed_ms)
+
+            if progress_callback is not None and progress_interval_sec > 0:
+                now = time.perf_counter()
+                should_emit = (now - last_progress_ts) >= progress_interval_sec or (loop_idx + 1) == loops
+                if should_emit:
+                    elapsed_so_far = now - start_total
+                    avg_loop_sec = elapsed_so_far / float(loop_idx + 1)
+                    loops_remaining = loops - (loop_idx + 1)
+                    progress_callback(
+                        {
+                            "loops_completed": loop_idx + 1,
+                            "loops_total": loops,
+                            "progress_pct": ((loop_idx + 1) / loops) * 100.0,
+                            "elapsed_sec": elapsed_so_far,
+                            "estimated_remaining_sec": loops_remaining * avg_loop_sec,
+                        }
+                    )
+                    last_progress_ts = now
+
+        elapsed_total = time.perf_counter() - start_total
+        total_requests = loops
+        total_predictions = loops * int(self.config.batch_size)
+        requests_per_sec = total_requests / elapsed_total if elapsed_total > 0 else 0.0
+        samples_per_sec = total_predictions / elapsed_total if elapsed_total > 0 else 0.0
+
+        stats = self._latency_stats(latencies_ms)
+        stats.update(
+            {
+                "backend_requested": self.config.backend,
+                "backend_used": backend,
+                "model_backend": model_backend,
+                "total_requests": total_requests,
+                "batch_size": int(self.config.batch_size),
+                "total_predictions": total_predictions,
+                "elapsed_total_sec": elapsed_total,
+                "throughput_requests_per_sec": requests_per_sec,
+                "throughput_samples_per_sec": samples_per_sec,
+            }
+        )
+        return stats
