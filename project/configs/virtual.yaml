@@ -1,0 +1,7 @@
+# Virtualized environment experiment configuration
+experiment_name: virtual_experiment
+workload:
+  model: TODO
+  batch_size: 1
+monitoring:
+  interval_seconds: 1
