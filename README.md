@@ -67,3 +67,9 @@ variance, and improve training efficiency in multi-tenant AI environments?
 Success Statement:
 
 The project will be considered successful if the accelerator-aware control framework reduces training throughput variance by at least 30% in multi-tenant virtual GPU environments while maintaining telemetry overhead below 3% CPU utilization. Additionally, the system must detect GPU contention events with ≥85% accuracy, attribute performance bottlenecks correctly in ≥80% of experiments, and maintain scaling efficiency above 70%
+
+
+## USAGE
+
+(physical GPU) run: python main.py --config configs/physical.yaml 
+(virtual GPU) run: python main.py --config configs/virtual.yaml 

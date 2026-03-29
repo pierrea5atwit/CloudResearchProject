@@ -1,7 +1,23 @@
-# Physical hardware experiment configuration
-experiment_name: physical_experiment
+environment: "physical"
+
+experiment:
+  duration_seconds: 60
+  warmup_seconds: 5
+  repeat_runs: 3
+
 workload:
-  model: TODO
-  batch_size: 1
+  n_samples: 1000000
+  n_features: 64
+  batch_size: 2000
+  k_neighbors: 5
+  inference_loops: 1000
+
+concurrency:
+  num_workers: 8
+
 monitoring:
-  interval_seconds: 1
+  sample_interval_sec: 1
+
+logging:
+  output_dir: "results/"
+  log_interval: 1
