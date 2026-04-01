@@ -177,7 +177,9 @@ def main() -> None:
 
     log.info("Baseline dry run for runtime estimation.")
     dry_run_result = Workload(config["workload"]).run()
-    log.info("Single-worker dry run complete: %s", dry_run_result)
+    log.info("Single-worker dry run complete:")
+    for key, value in dry_run_result.items():
+        log.info("  %s: %s", key, value)
 
     num_workers = int(config["concurrency"].get("num_workers", 1))
     estimate = _estimate_parallel_runtime(dry_run_result, num_workers=num_workers)
@@ -245,12 +247,19 @@ def main() -> None:
     )
     log.info("GPU activity validation result: %s", gpu_activity_valid)
     if not gpu_activity_valid.get("valid", False):
-        if args.require_virtual:
-            raise RuntimeError(
-                f"Experiment GPU activity check failed: {gpu_activity_valid.get('reason')}. "
-                "This may indicate the workload is not GPU-bound or GPU resources are unavailable."
-            )
-        log.warning("GPU activity check failed; dev-skip-vgpu-gate override active. Continuing for local testability.")
+        # Check if workload was GPU-bound (gpu_kernel type)
+        workload_type = str(config.get("workload", {}).get("workload_type", "knn")).lower().strip()
+        if workload_type == "gpu_kernel":
+            # GPU workload was requested but didn't show activity: this is a real error
+            if args.require_virtual:
+                raise RuntimeError(
+                    f"Experiment GPU activity check failed: {gpu_activity_valid.get('reason')}. "
+                    "This may indicate the workload is not GPU-bound or GPU resources are unavailable."
+                )
+            log.warning("GPU activity check failed; dev-skip-vgpu-gate override active. Continuing for local testability.")
+        else:
+            # CPU workload (knn): GPU activity not required, just log info
+            log.info("GPU activity low (expected for CPU-based workload type '%s'). GPU check skipped.", workload_type)
 
     summary = _aggregate_results(worker_results, telemetry_samples)
     log.info("Final aggregation: %s", summary)
