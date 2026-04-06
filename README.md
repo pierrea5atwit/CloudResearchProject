@@ -97,22 +97,22 @@ python project/main.py --config configs/virtual.yaml
 
 ### Workload Types
 
-The project supports two workload modes configured in the YAML:
+The project supports two workload modes configured in the YAML via `workload.workload_type`:
 
-**kNN Inference (default)**
-- CPU-based kNN distance computation
-- Good for testing CPU baseline and framework overhead
-- No GPU dependencies
-
-**GPU-Accelerated Matrix Multiplication** (`gpu_kernel`)
+**GPU-Accelerated Matrix Multiplication** (`gpu_kernel`) — default for `virtual.yaml`
 - Requires CuPy: `pip install cupy-cuda12x` (adjust CUDA version as needed)
-- Produces sustained GPU load via matrix multiplication
-- Recommended for vGPU virtual experiments
-- Returns GFLOPs/sec metrics for GPU throughput measurement
+- Produces sustained GPU load via CuPy `cp.dot` matrix multiplication
+- Records GFLOPs/sec in addition to latency and throughput
+- Required for telemetry-observable GPU utilization on vGPU instances
 
-To use GPU kernel workload:
+**kNN Inference** (`knn`)
+- Uses cuML `KNeighborsClassifier` if available; falls back to a lightweight numpy implementation
+- CPU-bound in fallback mode — GPU utilization will read 0%, which is expected
+- Useful for CPU baseline measurements and local development without a GPU
 
-python project/main.py --config configs/virtual_gpu_kernel.yaml
+To run the kNN config explicitly:
+
+python project/main.py --config configs/virtual.yaml  # after setting workload_type: knn
 
 ## Command-Line Arguments
 
@@ -146,10 +146,91 @@ Local dev mode without progress spam:
 
 python project/main.py --config configs/virtual.yaml --dev-skip-vgpu-gate --no-progress
 
+## Concurrency Sweep
+
+To run the full scenario matrix (2, 4, 6, and 8 concurrent workers) in sequence:
+
+python run_scenarios.py
+
+Each scenario uses the `gpu_kernel` workload with a 1000×1000 CuPy matrix. All results
+accumulate in `results/` across scenarios, keyed by `run_id`, for knee-curve analysis.
+
+```
+# Local dev (no GPU):
+python run_scenarios.py --dev-skip-vgpu-gate --no-progress
+
+# Run a subset:
+python run_scenarios.py --workers 4 8
+
+# Stop on first failure:
+python run_scenarios.py --fail-fast
+```
+
+## Results Output
+
+After each run, two CSV files are written (or appended) to the directory set by
+`logging.output_dir` in the config (default: `results/`).
+
+### `results/worker_results.csv`
+
+One row per worker per run.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `run_id` | string | ISO UTC timestamp at write time — join key with `telemetry.csv` |
+| `timestamp` | string | ISO UTC finish time of this specific worker process |
+| `environment` | string | Value of `config.environment` (`virtual` or `physical`) |
+| `num_workers` | int | Total concurrent workers in this run |
+| `worker_id` | int | Zero-based worker index |
+| `status` | string | `ok` or `error` |
+| `workload_type` | string | `gpu_kernel` or `knn` |
+| `backend_used` | string | `cupy` or `numpy` — actual backend after fallback resolution |
+| `model_backend` | string | `gpu-kernel-matmul`, `cuml`, or `numpy-fallback` |
+| `latency_mean_ms` | float | Mean per-loop latency over the measurement phase |
+| `latency_std_ms` | float | Standard deviation of per-loop latency |
+| `latency_p50_ms` | float | Median latency |
+| `latency_p95_ms` | float | 95th-percentile latency |
+| `latency_p99_ms` | float | 99th-percentile latency |
+| `throughput_requests_per_sec` | float | Loops completed per second (measurement phase only) |
+| `gflops_per_sec` | float | GPU throughput in GFLOPs/s (`gpu_kernel` only; NaN for kNN) |
+| `total_requests` | int | Total inference loops completed |
+| `elapsed_total_sec` | float | Wall time of the measurement phase (excludes warmup) |
+
+### `results/telemetry.csv`
+
+One row per NVML sample per run.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `run_id` | string | ISO UTC timestamp at write time — join key with `worker_results.csv` |
+| `timestamp` | string | ISO UTC time of this specific NVML sample |
+| `environment` | string | Value of `config.environment` |
+| `num_workers` | int | Total concurrent workers in this run |
+| `gpu_utilization_pct` | float | SM utilization % from `nvmlDeviceGetUtilizationRates` |
+| `memory_utilization_pct` | float | Memory bus utilization % |
+| `memory_used_mb` | float | VRAM in use (MB) from `nvmlDeviceGetMemoryInfo` |
+
+### Loading results for analysis
+
+```python
+import pandas as pd
+
+workers = pd.read_csv("results/worker_results.csv")
+telemetry = pd.read_csv("results/telemetry.csv")
+
+# Aggregate throughput per concurrency level (knee curve)
+knee = workers[workers["status"] == "ok"].groupby("num_workers")["throughput_requests_per_sec"].sum()
+
+# Mean GPU utilization per run, joined to worker throughput
+util_per_run = telemetry.groupby("run_id")["gpu_utilization_pct"].mean().reset_index()
+merged = workers.merge(util_per_run, on="run_id")
+```
+
 ## Notes
 
 - The workflow is **strict virtual-only** by default. Config must have `environment: virtual`.
 - In strict mode, runtime must show virtual/vGPU indicators AND GPU activity during worker execution.
 - GPU activity validation occurs **post-run** using telemetry collected during active worker execution (not idle time).
-- Use `--dev-skip-vgpu-gate` only for local/debug environments where cloud vGPU signals are incomplete or NVML is unavailable.
-- This project uses numpy fallback inference for CPU-based testing; GPU-accelerated cuML is not installed.
+- `virtual.yaml` defaults to `workload_type: gpu_kernel`. For CPU-only local testing, set `workload_type: knn` and add `--dev-skip-vgpu-gate`.
+- kNN in fallback mode (no cuML) caps training samples at 4096 and batch size at 256 regardless of config values; it is not suitable for GPU load testing.
+- GPU-accelerated cuML is not installed; kNN GPU inference requires a RAPIDS environment.

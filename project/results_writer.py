@@ -1,17 +1,20 @@
 """Persist experiment results to CSV using pandas.
 
 Writes two append-only files into the configured output directory:
-  - worker_results.csv  : one row per worker per run (latency + throughput)
-  - telemetry.csv       : one row per NVML sample per run (GPU utilization + memory)
+  - worker_results.csv  : one row per worker per run
+                          (identity, latency percentiles, throughput, GFLOPs)
+  - telemetry.csv       : one row per NVML sample per run
+                          (GPU utilization, memory utilization, memory used)
 
-Both files share a `run_id` column (ISO timestamp of run start) so they can be
-joined for visualizations described in TESTING.md.
+Both files share a `run_id` column (ISO UTC timestamp at write time) so they
+can be joined for the visualizations described in TESTING.md. Worker rows carry
+their own `timestamp` derived from the worker's recorded finish time, giving
+per-worker temporal resolution within a run.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,12 +29,15 @@ _WORKER_COLUMNS = [
     "worker_id",
     "status",
     "workload_type",
+    "backend_used",
+    "model_backend",
     "latency_mean_ms",
     "latency_std_ms",
     "latency_p50_ms",
     "latency_p95_ms",
     "latency_p99_ms",
     "throughput_requests_per_sec",
+    "gflops_per_sec",
     "total_requests",
     "elapsed_total_sec",
 ]
@@ -70,20 +76,31 @@ def build_worker_dataframe(
     rows: list[dict[str, Any]] = []
     for item in worker_results:
         result = item.get("result") or {}
+        finished_at = item.get("finished_at")
+        if finished_at is not None:
+            worker_ts = datetime.fromtimestamp(float(finished_at), tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+        else:
+            worker_ts = run_id
+
         row: dict[str, Any] = {
             "run_id": run_id,
-            "timestamp": run_id,
+            "timestamp": worker_ts,
             "environment": environment,
             "num_workers": num_workers,
             "worker_id": item.get("worker_id"),
             "status": item.get("status", "unknown"),
             "workload_type": workload_type,
+            "backend_used": result.get("backend_used"),
+            "model_backend": result.get("model_backend"),
             "latency_mean_ms": result.get("latency_mean_ms"),
             "latency_std_ms": result.get("latency_std_ms"),
             "latency_p50_ms": result.get("latency_p50_ms"),
             "latency_p95_ms": result.get("latency_p95_ms"),
             "latency_p99_ms": result.get("latency_p99_ms"),
             "throughput_requests_per_sec": result.get("throughput_requests_per_sec"),
+            "gflops_per_sec": result.get("gflops_per_sec"),
             "total_requests": result.get("total_requests"),
             "elapsed_total_sec": result.get("elapsed_total_sec"),
         }

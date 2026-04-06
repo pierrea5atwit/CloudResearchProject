@@ -267,3 +267,153 @@ telemetry = pd.read_csv("results/telemetry.csv")
 # Join on run_id for utilization vs throughput analysis
 merged = workers.merge(telemetry.groupby("run_id")["gpu_utilization_pct"].mean().reset_index(), on="run_id")
 ```
+
+---
+
+# Fix Summary: Workload Identity Logging and CSV Schema Extension
+
+## Changes Made
+
+### Fix #6: Workload Identity Logging at Runtime
+
+**Problem:** When a run produced results, no log line indicated which workload type, backend, or model was actually active. On a vGPU instance this distinction matters: `gpu_kernel` with `cupy`, `knn` with `cuml`, and `knn` with `numpy-fallback` produce fundamentally different resource profiles. Without a log entry at the point of resolution, a 0% GPU utilization result was ambiguous.
+
+**Files changed:** `project/workload.py`
+
+**Implementation:**
+
+A module-level logger is instantiated at import time under the existing `cloud_research` hierarchy:
+
+```python
+from logger import get_logger
+_log = get_logger("cloud_research.workload")
+```
+
+No new logger configuration is needed — `get_logger` reuses the handler and formatter already set up by `logger.py`. The `cloud_research.workload` name places it in the same namespace as `cloud_research.main`, so log output is consistent across modules.
+
+**Log line emitted by `_gpu_kernel_matmul`** (after GPU matrices are allocated, all facts confirmed):
+
+```
+Workload | type=gpu_kernel | backend=cupy | matrix_dim=1000 | loops=200 | warmup=5.0s
+```
+
+`matrix_dim` is logged here rather than `n_samples` because it is the operationally meaningful value — it is the dimension of the matrices that will actually be multiplied on the GPU.
+
+**Log line emitted by `_run_knn_inference`** (after model/backend resolution, before the warmup phase):
+
+```
+Workload | type=knn | backend=numpy | model=numpy-fallback | k=5 | loops=500 | warmup=5.0s
+```
+
+The `model=` field distinguishes `cuml` from `numpy-fallback` at runtime, which is the key signal for whether GPU inference was actually used.
+
+Both lines are emitted once per worker process (each spawned worker initializes its own `Workload` instance), so in a 4-worker run the log will contain 4 identical lines confirming all workers resolved the same configuration.
+
+---
+
+### Fix #7: Extend `worker_results.csv` with Backend and GFLOPs Columns
+
+**Problem:** `results/worker_results.csv` captured throughput and latency but omitted the workload identity fields already present in the `result` dict returned by `Workload.run()`. Without `backend_used` and `model_backend` in the CSV, post-run analysis could not distinguish runs by compute backend, and GFLOPs data from GPU kernel runs was silently discarded.
+
+**File changed:** `project/results_writer.py`
+
+**Columns added to `_WORKER_COLUMNS` and `build_worker_dataframe`:**
+
+| Column | Source | Notes |
+|--------|--------|-------|
+| `backend_used` | `result["backend_used"]` | `"cupy"` or `"numpy"` — the backend that was actually used after fallback resolution |
+| `model_backend` | `result["model_backend"]` | `"gpu-kernel-matmul"`, `"cuml"`, or `"numpy-fallback"` — the specific compute path |
+| `gflops_per_sec` | `result["gflops_per_sec"]` | Populated for `gpu_kernel` runs; `NaN` for kNN runs (key absent, pandas fills gracefully) |
+
+These columns are positioned in the schema between `workload_type` and the latency columns so workload identity fields are grouped together:
+
+```
+run_id | timestamp | environment | num_workers | worker_id | status |
+workload_type | backend_used | model_backend |
+latency_mean_ms | ... | throughput_requests_per_sec | gflops_per_sec |
+total_requests | elapsed_total_sec
+```
+
+`gflops_per_sec` is placed adjacent to `throughput_requests_per_sec` since both measure compute output rate, just in different units (requests/s for kNN, GFLOPs/s for matrix kernels).
+
+**Unused import removed:** `import time` was present in `results_writer.py` but never called. Removed.
+
+---
+
+### Fix #8: Concurrency Sweep Configs and Scenario Runner
+
+**Problem:** The experiment required running the same heavy-load workload under 2, 4, 6, and 8 concurrent workers to produce the knee curve and contention data described in TESTING.md. There was no mechanism to do this in a single command — each scenario required a manual invocation and a separate config file.
+
+**Files added:**
+
+- `project/configs/scenario_workers_2.yaml`
+- `project/configs/scenario_workers_4.yaml`
+- `project/configs/scenario_workers_6.yaml`
+- `project/configs/scenario_workers_8.yaml`
+- `run_scenarios.py` *(workspace root)*
+
+**Scenario config design:**
+
+All four configs use identical workload parameters. Per AGENT.MD: *"The ONLY intended variable is: Number of concurrent GPU workers."* Varying the workload across scenarios would confound the contention signal.
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `workload_type` | `gpu_kernel` | CuPy `cp.dot` — only workload that produces measurable GPU utilization without cuML |
+| `backend` | `cupy` | Required for `gpu_kernel` |
+| `n_samples` | `1000000` | `matrix_dim = sqrt(1000000) = 1000` → 1000×1000 float32 matrices (~2 GFLOPs/op) |
+| `inference_loops` | `200` | Sufficient measurement phase without excessive wall time per scenario |
+| `warmup_seconds` | `5` | Consistent with all other configs; primes CUDA context before measurement |
+| `sample_interval_sec` | `0.5` | Doubled telemetry resolution (vs default 1s) for finer contention detection |
+
+The 1000×1000 matrix size was chosen to produce real GPU pressure: at even a moderate 1 TFLOPS effective throughput, each matmul takes ~2ms, meaning 200 loops ≈ 400ms of pure compute per worker. With 8 workers all issuing `cp.dot` concurrently, this creates genuine contention on the GPU's compute schedulers.
+
+**`run_scenarios.py` — implementation details:**
+
+The runner drives `main.py` as a subprocess for each scenario, inheriting the full initialization path (NVML checks, virtual gate, dry run, monitor lifecycle). This avoids duplicating or reimporting the setup logic from `main.py`.
+
+Key behaviors:
+- Scenarios run sequentially (not in parallel) — parallel execution would conflate the per-scenario contention signal
+- `--fail-fast` flag stops the sweep on first non-zero exit code; default is to continue and report all pass/fail at the end
+- `--workers` accepts a custom list to run a subset (e.g. `--workers 4 8`)
+- All pass-through flags (`--dev-skip-vgpu-gate`, `--no-progress`, `--gpu-index`) are forwarded to each `main.py` invocation unchanged
+
+**Usage:**
+
+```bash
+# Full sweep on vGPU instance:
+python run_scenarios.py
+
+# Local dev (no GPU):
+python run_scenarios.py --dev-skip-vgpu-gate --no-progress
+
+# Partial sweep with early exit on failure:
+python run_scenarios.py --workers 4 8 --fail-fast
+```
+
+After a full sweep, `results/worker_results.csv` contains rows for all four concurrency levels, filterable by `num_workers`, ready for knee-curve plotting:
+
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_csv("results/worker_results.csv")
+agg = df[df["status"] == "ok"].groupby("num_workers")["throughput_requests_per_sec"].sum().reset_index()
+plt.plot(agg["num_workers"], agg["throughput_requests_per_sec"], marker="o")
+plt.xlabel("Concurrent workers"); plt.ylabel("Aggregate req/s"); plt.title("Throughput Knee Curve")
+plt.show()
+```
+
+---
+
+## Full Change Index
+
+| # | Description | Files | Type |
+|---|-------------|-------|------|
+| 1 | Dry run logging readability | `project/main.py` | Enhancement |
+| 2 | GPU activity check RuntimeError for CPU workloads | `project/main.py` | Bug Fix |
+| 3 | Warmup phase (discard cold-start latency) | `project/workload.py`, `project/main.py` | Feature |
+| 4 | Switch `virtual.yaml` default to GPU kernel workload | `project/configs/virtual.yaml` | Config Change |
+| 5 | Pandas CSV result persistence (`worker_results.csv`, `telemetry.csv`) | `project/results_writer.py` *(new)*, `project/main.py` | Feature |
+| 6 | Workload identity log lines at backend/model resolution | `project/workload.py` | Feature |
+| 7 | Extend CSV schema: `backend_used`, `model_backend`, `gflops_per_sec` | `project/results_writer.py` | Enhancement |
+| 8 | Concurrency sweep configs and scenario runner | `project/configs/scenario_workers_*.yaml` *(new × 4)*, `run_scenarios.py` *(new)* | Feature |

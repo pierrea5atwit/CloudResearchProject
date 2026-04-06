@@ -1,0 +1,30 @@
+environment: "virtual"
+
+# Concurrency scenario: 8 workers (stress / saturation test)
+# Workload: gpu_kernel CuPy matmul — 1000x1000 float32 matrices (~2 GFLOPs per op)
+
+experiment:
+  duration_seconds: 60
+  warmup_seconds: 5
+  repeat_runs: 3
+
+workload:
+  n_samples: 1000000   # matrix_dim = sqrt(1000000) = 1000
+  n_features: 64
+  n_classes: 4
+  batch_size: 64
+  k_neighbors: 5
+  inference_loops: 200
+  random_seed: 42
+  backend: "cupy"
+  workload_type: "gpu_kernel"
+
+concurrency:
+  num_workers: 8
+
+monitoring:
+  sample_interval_sec: 0.5
+
+logging:
+  output_dir: "results/"
+  log_interval: 1

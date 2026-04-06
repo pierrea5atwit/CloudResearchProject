@@ -86,20 +86,72 @@ Each primary metric should map to a chart that communicates scaling behavior, sa
 
 ### Immediate implementation work packages
 
-1. Config package
-Add scenario definitions and run parameters in YAML (virtual vs physical).
+1. Config package — **complete**
+YAML configs exist for virtual, physical, smoke, and concurrency scenarios (2, 4, 6, 8 workers).
+All scenario configs enforce the same workload parameters; only `num_workers` varies per AGENT.MD.
 
-2. Workload runner
-Implement concurrent inference workers, warm-up handling, and per-worker metrics.
+2. Workload runner — **complete**
+Concurrent multiprocessing workers run the `gpu_kernel` (CuPy matmul) or `knn` workload.
+Warmup phase (time-based, driven by `experiment.warmup_seconds`) discards cold-start loops before measurement begins.
+Per-worker metrics returned: latency percentiles, throughput req/s, GFLOPs/s, total requests, elapsed time.
 
-3. Telemetry monitor
-Implement NVML sampling loop with timestamp alignment and minimal overhead.
+3. Telemetry monitor — **complete**
+NVML sampling loop runs in a background thread during worker execution.
+Samples: `gpu_utilization_pct`, `memory_utilization_pct`, `memory_used_mb` at configurable interval (default 0.5s for scenario configs).
+GPU activity validated post-run; behavior is workload-aware (0% is expected and non-fatal for CPU kNN).
 
-4. Logging/aggregation
-Standardize structured logs and summary outputs for downstream analysis.
+4. Logging/aggregation — **complete**
+Structured log lines emitted at workload resolution, per-worker completion, telemetry stop, and run summary.
+Results persisted to `results/` as two append-only CSVs via `project/results_writer.py`:
 
-5. Evaluation module
+**`results/worker_results.csv`** — one row per worker per run
+
+| Column | Description |
+| --- | --- |
+| `run_id` | ISO UTC write-time timestamp; join key with `telemetry.csv` |
+| `timestamp` | ISO UTC finish time of this worker process |
+| `environment` | `virtual` or `physical` |
+| `num_workers` | Concurrent workers in this run |
+| `worker_id` | Zero-based worker index |
+| `status` | `ok` or `error` |
+| `workload_type` | `gpu_kernel` or `knn` |
+| `backend_used` | `cupy` or `numpy` (post-fallback) |
+| `model_backend` | `gpu-kernel-matmul`, `cuml`, or `numpy-fallback` |
+| `latency_mean_ms` | Mean per-loop latency (measurement phase) |
+| `latency_std_ms` | Latency standard deviation |
+| `latency_p50_ms` | Median latency |
+| `latency_p95_ms` | 95th-percentile latency |
+| `latency_p99_ms` | 99th-percentile latency |
+| `throughput_requests_per_sec` | Loops/sec (measurement phase only, warmup excluded) |
+| `gflops_per_sec` | GPU compute throughput (`gpu_kernel` only; NaN for kNN) |
+| `total_requests` | Total loops completed |
+| `elapsed_total_sec` | Measurement phase wall time |
+
+**`results/telemetry.csv`** — one row per NVML sample per run
+
+| Column | Description |
+| --- | --- |
+| `run_id` | Join key with `worker_results.csv` |
+| `timestamp` | ISO UTC time of this NVML sample |
+| `environment` | `virtual` or `physical` |
+| `num_workers` | Concurrent workers in this run |
+| `gpu_utilization_pct` | SM utilization % (`nvmlDeviceGetUtilizationRates`) |
+| `memory_utilization_pct` | Memory bus utilization % |
+| `memory_used_mb` | VRAM in use (MB) |
+
+5. Evaluation module — **pending**
 Compute KPI outcomes against success criteria and emit a final experiment verdict.
+Inputs will be `results/worker_results.csv` and `results/telemetry.csv` accumulated across the concurrency sweep.
+
+### Concurrency sweep
+
+The scenario runner (`run_scenarios.py`) drives four sequential experiments at 2, 4, 6, and 8 workers
+using identical `gpu_kernel` workload parameters. Results accumulate in the same CSVs for joint analysis.
+
+```
+python run_scenarios.py                              # vGPU instance
+python run_scenarios.py --dev-skip-vgpu-gate --no-progress  # local dev
+```
 
 
 

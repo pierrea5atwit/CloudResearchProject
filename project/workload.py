@@ -8,6 +8,10 @@ from typing import Any, Callable
 
 import numpy as np
 
+from logger import get_logger
+
+_log = get_logger("cloud_research.workload")
+
 try:
     import cupy as cp  # type: ignore
 except Exception:  # pragma: no cover - optional at development time
@@ -122,6 +126,11 @@ class Workload:
         a = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
         b = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
 
+        _log.info(
+            "Workload | type=gpu_kernel | backend=cupy | matrix_dim=%d | loops=%d | warmup=%.1fs",
+            matrix_dim, loops, float(self.config.warmup_seconds),
+        )
+
         warmup_sec = float(self.config.warmup_seconds)
         if warmup_sec > 0:
             warmup_deadline = time.perf_counter() + warmup_sec
@@ -204,6 +213,12 @@ class Workload:
                 x_train = cp.asnumpy(x_train)
                 y_train = cp.asnumpy(y_train)
                 x_infer = cp.asnumpy(x_infer)
+
+        _log.info(
+            "Workload | type=knn | backend=%s | model=%s | k=%d | loops=%d | warmup=%.1fs",
+            backend, model_backend, int(self.config.k_neighbors),
+            int(self.config.inference_loops), float(self.config.warmup_seconds),
+        )
 
         loops = int(self.config.inference_loops)
         if loops <= 0:
