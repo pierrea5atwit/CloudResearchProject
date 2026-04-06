@@ -32,6 +32,7 @@ class WorkloadConfig:
     random_seed: int = 42
     backend: str = "numpy"  # "numpy" or "cupy"
     workload_type: str = "knn"  # "knn" for inference, "gpu_kernel" for GPU matrix ops
+    warmup_seconds: float = 0.0  # seconds of warmup to discard before measurement
 
 
 class Workload:
@@ -115,14 +116,21 @@ class Workload:
         loops = int(self.config.inference_loops)
         matrix_dim = int(int(self.config.n_samples) ** 0.5)
         latencies_ms: list[float] = []
-        start_total = time.perf_counter()
-        last_progress_ts = start_total
 
         # Pre-allocate GPU matrices for sustained operations
         cp.random.seed(int(self.config.random_seed))
         a = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
         b = cp.random.random((matrix_dim, matrix_dim), dtype=cp.float32)
 
+        warmup_sec = float(self.config.warmup_seconds)
+        if warmup_sec > 0:
+            warmup_deadline = time.perf_counter() + warmup_sec
+            while time.perf_counter() < warmup_deadline:
+                _ = cp.dot(a, b)
+                cp.cuda.Stream.null.synchronize()
+
+        start_total = time.perf_counter()
+        last_progress_ts = start_total
         for loop_idx in range(loops):
             start = time.perf_counter()
             _ = cp.dot(a, b)  # GPU matrix multiplication
@@ -200,6 +208,15 @@ class Workload:
         loops = int(self.config.inference_loops)
         if loops <= 0:
             raise ValueError("inference_loops must be > 0")
+
+        warmup_sec = float(self.config.warmup_seconds)
+        if warmup_sec > 0:
+            warmup_deadline = time.perf_counter() + warmup_sec
+            while time.perf_counter() < warmup_deadline:
+                if model_backend == "cuml":
+                    _ = model.predict(x_infer)
+                else:
+                    _ = self._predict_numpy_fallback(x_train, y_train, x_infer)
 
         latencies_ms: list[float] = []
         start_total = time.perf_counter()

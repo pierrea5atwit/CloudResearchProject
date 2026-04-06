@@ -9,6 +9,7 @@ from typing import Any
 from config import load_config
 from logger import get_logger, log_runtime_environment
 from monitor import Monitor
+from results_writer import write_run_results
 from runner import run_concurrent_workers
 from workload import Workload
 
@@ -175,8 +176,12 @@ def main() -> None:
             )
         log.info("Virtual environment gate passed (NVIDIA vGPU signal detected).")
 
-    log.info("Baseline dry run for runtime estimation.")
-    dry_run_result = Workload(config["workload"]).run()
+    warmup_seconds = float(config.get("experiment", {}).get("warmup_seconds", 0))
+    workload_cfg = dict(config["workload"])
+    workload_cfg["warmup_seconds"] = warmup_seconds
+
+    log.info("Baseline dry run for runtime estimation (warmup=%.1fs).", warmup_seconds)
+    dry_run_result = Workload(workload_cfg).run()
     log.info("Single-worker dry run complete:")
     for key, value in dry_run_result.items():
         log.info("  %s: %s", key, value)
@@ -231,7 +236,7 @@ def main() -> None:
 
         worker_results = run_concurrent_workers(
             num_workers=num_workers,
-            workload_config=dict(config["workload"]),
+            workload_config=workload_cfg,
             on_result=_on_worker_result,
             on_event=_on_worker_event,
             progress_interval_sec=max(2.0, float(args.progress_interval_sec)),
@@ -263,6 +268,8 @@ def main() -> None:
 
     summary = _aggregate_results(worker_results, telemetry_samples)
     log.info("Final aggregation: %s", summary)
+
+    write_run_results(worker_results, telemetry_samples, config, log)
 
 
 if __name__ == "__main__":

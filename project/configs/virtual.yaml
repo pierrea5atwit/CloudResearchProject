@@ -11,6 +11,8 @@ workload:
   batch_size: 1000
   k_neighbors: 5
   inference_loops: 500
+  backend: "cupy"
+  workload_type: "gpu_kernel"
 
 concurrency:
   num_workers: 4
